@@ -125,17 +125,19 @@ library(keyring)
 library(doParallel)
 library(foreach)
 library(ncdf4)
+install.packages("ncdf4.helpers")
 library(ncdf4.helpers)
+av[av[, "ncdf4.helpers"] == pkg, ]
 
 # Housekeeping ----
 
 # Sys.setenv(tz = 'GMT') # if using Azure VM, will need to set the system time zone
 
-data_dir <- "processed_EvD" # directory within project folder to store downloaded data
+data_dir <- "~/Documents/github/green-bces/processed_evd" # directory within project folder to store downloaded data
 
-my_uid <- "12345" # your CDS store user ID
+my_uid <- "mayagreen6644@gmail.com" # your CDS store user ID
 
-my_key <- "1a-2b-3c-4d" # your CDS store key
+my_key <- "b89f66bf-6001-4ccb-970a-128d9da8d7bb" # your CDS store key
 
 crs <- 26920 # (UTM20) # projected coordinate reference system  (integer EPSG code)
 # crs <- 26921 # (UTM21)
@@ -150,11 +152,11 @@ wf_set_key(user = my_uid, # personal User ID for CDS
 
 # Provide query arguments for CDS data request
 
-years <- str_pad(2011:2020, 4) # year range
+years <- str_pad(2024:2025, 4) # year range
 months <- str_pad(1:12, 2, "left", 0) # Jan - Dec
 days <- str_pad(1:31,2,"left","0") # 31 days
 hours <- str_c(0:23,"00",sep=":")%>%str_pad(5,"left","0") # 24 hrs
-bbox <- "48/-67.5/42.5/-57.5" # bounding box for region of interest (N, W, S, E)
+bbox <- "55/-82/51/-75" # bounding box for region of interest (N, W, S, E)
 
 # Loop through years, provide query as list, and download data
 
@@ -188,12 +190,17 @@ foreach (i =  1:length(years)) %dopar% {
 
 stopCluster(cl)
 
+library(ncdf4)
+nc_data <- nc_open("processed_evd/era5_2024.nc") # Replace "your_file_path.nc" with your file's path
+print(nc_data) # Prints file metadata and variable details
+
+
 # Summarize wind data ----
 
 era5 <- list.files(path = data_dir, pattern = "^era5", full.names = T) %>% 
   map(., nc_open)
 
-time <- map(era5, ~ncvar_get(.x, "time"))
+time <- map(era5, ~ncvar_get(.x, "valid_time"))
 
 u10 <- map(era5, ~as.vector(ncvar_get(.x, 'u10')))
 v10 <- map(era5, ~as.vector(ncvar_get(.x, 'v10')))
@@ -212,6 +219,9 @@ longitude_long <-  map2(longitude, latitude, ~rep(.x, length(.y))) %>%
 date_time <- pmap(list(time, latitude, longitude), ~lapply(..1, function(x) rep(x, (length(..2) * length(..3))))) %>%  
   map(., unlist) %>% 
   map(., ~as.POSIXct(.x * 3600, origin = "1900-01-01 00:00:00", tz = "UTC"))
+
+
+###### wind dataframe ####### 
 
 wind_data <- pmap(list(longitude_long, latitude_long, date_time, u10, v10), 
                   ~data.frame(longitude = ..1, latitude = ..2, date_time = ..3, u10 =  ..4, v10 = ..5)) %>% 
