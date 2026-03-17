@@ -218,7 +218,7 @@ longitude_long <-  map2(longitude, latitude, ~rep(.x, length(.y))) %>%
 
 date_time <- pmap(list(time, latitude, longitude), ~lapply(..1, function(x) rep(x, (length(..2) * length(..3))))) %>%  
   map(., unlist) %>% 
-  map(., ~as.POSIXct(.x * 3600, origin = "1900-01-01 00:00:00", tz = "UTC"))
+  map(., ~as.POSIXct(.x*3600, origin = "1900-01-01 00:00:00", tz = "UTC"))
 
 
 ###### wind dataframe ####### 
@@ -247,7 +247,7 @@ wind_data <- pmap(list(longitude_long, latitude_long, date_time, u10, v10),
       dplyr::select(direction) %>% 
       table() %>% 
       data.frame() %>%
-      rename(direction = ".") %>% 
+      # rename(direction = ".") %>% 
       mutate(freq_total = Freq/sum(Freq), 
              direction = as.numeric(as.character(direction)))})) %>%
   # average speed by direction
@@ -263,8 +263,8 @@ wind_data <- pmap(list(longitude_long, latitude_long, date_time, u10, v10),
       summarise(max_wind = mean(monthly_max)) %>% 
       mutate_if(is.factor, as.character) %>%
       mutate_if(is.character, as.numeric) %>%
-      mutate(max_wind = na_if(x = max_wind, y = 'NaN'),
-             max_wind = nafill(x = max_wind, fill = 0)) %>% 
+     # mutate(max_wind = na_if(x = max_wind, y = 'NaN'),
+            # max_wind = nafill(x = max_wind, fill = 0)) %>% 
       data.frame()})) %>% 
   # Join average wind speed and frequency into one table per station
   transmute(wind_dir_freq = map2(avg_wind, wind_dir_cbin, left_join)) %>%  
@@ -273,11 +273,18 @@ wind_data <- pmap(list(longitude_long, latitude_long, date_time, u10, v10),
 
 # save to RDS object
 
-saveRDS(wind_data, 'Data/Copernicus_era5_dir_freq_summary.rds')
+saveRDS(wind_data, 'processed_evd//Copernicus_era5_dir_freq_summary.rds')
 
 # cast to wide format and write to shapefile
 
-wind_unnest <- unnest(wind_nest, cols = wind_dir_freq)
+wind_unnest <- unnest(wind_data, cols = wind_dir_freq)
+
+# create id column
+id <- c(1:3944)
+wind_unnest$id <- id
+
+id <- c(1:493)
+wind_data$id <- id
 
 wind_wide <- dplyr::select(wind_unnest, -Freq) %>% 
   st_drop_geometry() %>% 
@@ -286,17 +293,17 @@ wind_wide <- dplyr::select(wind_unnest, -Freq) %>%
               id_cols = id,
               names_from = direction,
               values_from = c(mx_spd, freq)) %>% 
-  left_join(., dplyr::select(wind_nest, id)) %>% 
+  left_join(., dplyr::select(wind_data, id)) %>% 
   st_set_geometry(., value = .$geometry)
 
 st_write(wind_wide,
-         dsn = 'Data',
+         dsn = 'processed_evd/',
          layer = "Copernicus_era5_summary_wide",
          driver = 'ESRI Shapefile')
 
 # Move onto wind data interpolation: (4WindInterpolation.py)
 
-
+####### Setting up 
 
 
 
