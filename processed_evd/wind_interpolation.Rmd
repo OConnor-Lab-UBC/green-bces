@@ -1,0 +1,85 @@
+---
+title: "wind_interpolation"
+author: "Maya Green"
+date: "2026-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(reticulate)
+py_install(c("geopandas", "scipy", "rasterio", "numpy"))
+```
+
+```{python}
+
+import geopandas as gpd
+import numpy as np
+from scipy.interpolate import RBFInterpolator
+import rasterio
+from rasterio.transform import from_bounds
+import os
+
+# Set working directory
+working_dir = os.path.expanduser("~/Documents/github/green-bces/processed_evd")
+output_dir = os.path.join(working_dir, "processed_evd")
+os.makedirs(output_dir, exist_ok=True)
+
+# Load shapefile
+gdf = gpd.read_file(os.path.join(working_dir, "Copernicus_era5_summary_wide.shp"))
+
+# Get coordinates
+coords = np.array(list(zip(gdf.geometry.x, gdf.geometry.y)))
+
+# Set up output grid
+xmin, ymin, xmax, ymax = gdf.total_bounds
+cell_size = 350.0
+grid_x, grid_y = np.meshgrid(
+    np.arange(xmin, xmax, cell_size),
+    np.arange(ymin, ymax, cell_size)
+)
+# grid_points = np.array(list(zip(grid_x.ravel(), grid_y.ravel())))
+grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+
+# Get numeric fields only
+numeric_fields = gdf.select_dtypes(include=[np.number]).columns
+print(f"Fields to interpolate: {list(numeric_fields)}")
+
+for field in numeric_fields:
+    print(f"Interpolating {field}...")
+    try:
+        values = gdf[field].values
+        
+        # RBFInterpolator with thin plate spline (closest to regularized spline)
+        interpolator = RBFInterpolator(coords, values, 
+        smoothing=0.1, 
+        kernel='thin_plate_spline' 
+      ) 
+        grid_values = interpolator(grid_points).reshape(grid_x.shape)
+        
+        # Save as GeoTIFF
+        output_path = os.path.join(output_dir, f"{field}_spline.tif")
+        transform = from_bounds(xmin, ymin, xmax, ymax, grid_x.shape[1], grid_x.shape[0])
+        with rasterio.open(
+            output_path, "w",
+            driver="GTiff",
+            height=grid_x.shape[0],
+            width=grid_x.shape[1],
+            count=1,
+            dtype=grid_values.dtype,
+            crs=gdf.crs,
+            transform=transform
+        ) as dst:
+            dst.write(grid_values, 1)
+        print(f"Saved: {output_path}")
+    except Exception as e:
+        print(f"Error on {field}: {e}")
+
+print("Script complete")
+```
+```
+
