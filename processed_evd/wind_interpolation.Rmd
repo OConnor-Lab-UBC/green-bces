@@ -14,6 +14,10 @@ library(reticulate)
 py_install(c("geopandas", "scipy", "rasterio", "numpy"))
 ```
 
+
+This script was adapted from O'Brien et al (5WindInterpolation.py, https://github.com/cole-fields/REI-WaveExp/commit/fbf17f9ebb1c20c1a2123208279cefaed78d1b07)
+
+
 ```{python}
 
 import geopandas as gpd
@@ -36,7 +40,7 @@ coords = np.array(list(zip(gdf.geometry.x, gdf.geometry.y)))
 
 # Set up output grid
 xmin, ymin, xmax, ymax = gdf.total_bounds
-cell_size = 350.0
+cell_size = 350.0 # set large to test run initially 
 grid_x, grid_y = np.meshgrid(
     np.arange(xmin, xmax, cell_size),
     np.arange(ymin, ymax, cell_size)
