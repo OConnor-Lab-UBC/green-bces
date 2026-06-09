@@ -1,0 +1,538 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+install.packages("tidyverse")
+```
+
+
+```{r}
+# load packages
+
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(tidyr)
+library(sf)
+library(raster)
+#library(INLA)
+library(terra)
+library(ggmap)
+library(stringi)
+library(purrr)
+library(units)
+library(parallel)
+library(multidplyr)
+
+```
+# First download canada coastlines data from https://open.canada.ca/data/en/dataset/6c78fb2f-d23b-45b4-b3af-cc6f6cc4fff8
+
+```{r}
+# make a polygon of the James Bay coastline including islands
+
+canada_coast <- read_sf(dsn = "./canada_coastline_polygons/lhy_000h16a_e.shp")
+canada_coast # data is currently in Lambert Conformal Conic form
+```
+
+Processing this data to run it using a fetch function created by O'Brien. Below are the steps needed to create each input needed for the function.
+
+# Creating the necessary variables for fetch calculation 
+# polygon_layer
+
+```{r}
+#'polygon_layer = sf object where the
+#'                polygon geometries represent any obstructions to fetch
+#'                calculations including the coastline, islands and/or 
+#'                exposed reefs
+
+polygon_layer <- read_sf("./processed_EvD/shapefiles/james_bay_poly_coastline.shp")
+polygon_layer <- st_as_sf(polygon_layer)
+
+polygon_layer # projected CRS is NAD83/Statistics Canada Lambert
+```
+
+
+# site_layer
+I created a ton of point sites in a shapefile earlier so we will use those for site layer, but we need to narrow these down (there are >400,000 points in this layer)
+
+```{r}
+#' site_layer = sf object where the point 
+#'                geometries represent the site locations.
+
+site_layer <- read_sf("./") # this shp has about 450,000 points at a 300m resolution along the entire coast
+
+#' so that's 450,000*32 or 14,400,000 raw fetch vectors 
+#' which ends up giving 3.6 million effective fetch vectors 
+#' that's... a lot
+
+
+site_layer <- st_as_sf(site_layer)
+site_layer <- site_layer %>% 
+  dplyr::select(geometry)
+
+# project to polygon CRS
+site_layer <- st_transform(site_layer, st_crs(polygon_layer))
+site_layer
+
+
+```
+
+# max_dist, n_directions, and site_names
+```{r}
+#' max_dist = numeric. Maximum distance in kilometres (default 300). This 
+#'                will need to be scaled manually if the units for the CRS are 
+#'                not 'm'.
+# 300 m makes sense for James Bay
+
+#' n_directions = numeric. The number of fetch vectors to calculate per 
+#'                quadrant (default 8). 
+#'                
+#' site_names = character vector of the site names. If missing, the site 
+#'                names are taken from a column of the data associated with 
+#'                site_layer matching the regular expression 
+#'                {^[Nn]ames{0,1}}. If there is no such column, then 
+#'                default names are created ('Site 1', 'Site 2', ...).
+
+site_names <- c(1:20) # length of site_layer
+site_names <- as.character(site_names)
+
+#' quiet = logical. Suppress diagnostic messages? (Default {FALSE}).
+
+
+#one final check to make sure every variable looks good (site and polygon layers should have same CRS)
+polygon_layer
+site_layer
+site_names
+
+# need to also make site_vars for the parallel function
+site_layer$site_var <- NA
+site_var <- site_layer$site_var
+```
+
+# Look at this section Joe 
+
+This is one section that will take a lot of compute power.
+This function calculates fetch in 36 directions, so it's 32*number of points I give it (site_layer).
+Afterwards we calculate effective fetch which averages vectors across the 8 cardinal directions (NSEW etc).
+So total number of *effective* fetch points is fetch_raw_points/4
+
+(see parallel processing fetch function at line 268)
+
+```{r}
+fetch = function(polygon_layer, site_layer, max_dist = 300, n_directions = 8,
+                 site_names, quiet = FALSE){
+  
+  if (!is(polygon_layer, "sf") && !is(st_geometry(polygon_layer), c('sfc_POLYGON', 'sfc_MULTIPOLYGON')))
+    stop(paste("polygon_layer must be a sf object with a POLYGON or MULTIPOLYGON geometry type.\nSee",
+               "'?sf' for details on how to create a",
+               "sf object."), call. = FALSE)
+  
+  if (!is(site_layer, "sf") && !is(st_geometry(site_layer), c('sfc_POINT', 'sfc_MULTIPOINT')))
+    stop(paste("polygon_layer must be a sf object with a POINT or MULTIPOINT geometry type.\nSee",
+               "'?sf' for details on how to create a",
+               "sf object."), call. = FALSE)
+  
+  if(is(st_geometry(polygon_layer), 'sfc_MULTIPOLYGON'))
+     st_cast(polygon_layer, 'POLYGON')
+  
+  if (!is.numeric(max_dist) || length(max_dist) != 1)
+    stop("max_dist must be a single number.", call. = FALSE)
+  
+  if (!is.numeric(n_directions) || length(n_directions) != 1)
+    stop("n_directions must be a single integer.", call. = FALSE)
+  n_directions = round(n_directions)
+  
+  if (n_directions < 1 || n_directions > 90)
+    stop("n_directions must be between 1 and 90.", call. = FALSE)
+  
+  if (!missing(site_names)){
+    site_names = as.character(site_names)
+    
+    if (length(site_names) != nrow(site_layer)){
+      warning(paste("lengths differ for the number of sites and site names;", 
+                    "using default names instead."), call. = FALSE)
+      site_names = paste("Site", seq_along(st_geometry(site_layer)))
+    }
+  } else {
+    if (any(grepl("^[Nn]ames{0,1}$", names(site_layer)))){
+      name_col = grep("^[Nn]ames{0,1}$", names(site_layer))[[1]]
+      site_names = as.character(pull(site_layer, name_col))
+    } else {
+      site_names = paste("Site", seq_along(st_geometry(site_layer)))
+    }
+  }
+  
+  quiet = as.logical(quiet[1])
+  
+  ## Check if the polygon and points layers are projected, and ensure they have 
+  ## the same CRS.
+  which_proj = list(polygon_layer, site_layer) %>% 
+    map(., st_crs) %>% 
+    map_lgl(., ~grepl('PROJCRS',.$wkt[1]))
+  
+  if (all(!which_proj))
+    stop("polygon_layer and/or site_layer must be projected to calculate fetch", 
+         call. = FALSE)
+  
+  if (all(which_proj) && !identical(st_crs(polygon_layer), st_crs(site_layer))){
+    warning("the CRS for polygon_layer and site_layer differ; transforming
+              site_layer CRS to match")
+    site_layer = st_transform(site_layer, st_crs(polygon_layer))
+  }
+  
+  if (!which_proj[1]){
+    if (!quiet)
+      message("projecting polygon_layer onto the site_layer CRS")
+    polygon_layer = st_transform(polygon_layer, st_crs(site_layer))
+  }
+  
+  if (!which_proj[2]){
+    if (!quiet)
+      message("projecting site_layer onto the polygon_layer CRS")
+    site_layer = st_transform(site_layer, st_crs(polygon_layer))
+  }
+  
+  if (!quiet)
+    message("checking site locations are not on land")
+  
+  # Should remove these sites with warning instead of returning error
+  if (any(lengths(st_intersects(site_layer, polygon_layer)) > 0))
+    stop("at least one site location is on land")
+  
+  # Convert max_dist to appropriate units.
+  # First of all convert max_dist to metres (default)
+  max_dist = max_dist * 1000
+  
+  # Double check if metres are the correct units
+  # If not, warn the user that the supplied max_dist should be scaled 
+  # appropriately
+  if (st_crs(polygon_layer)$units != "m")
+    warning("the PROJ.4 unit is not metres; ensure max_dist has been scaled 
+            appropriately")
+  
+  directions = head(seq(0, 360, by = 360 / (n_directions * 4)), -1)
+  
+  # Rearrange sequence order to start at 90 degrees to match up with the output
+  # from st_buffer
+  directions = unlist(split(directions, directions < 90), use.names = FALSE)
+  
+  # Create nested data that calculates and stores Fetch Objects and lengths for
+  # each site
+  
+  message("calculating fetch for ", nrow(site_layer), " sites")
+  
+  fetch_sf <- site_layer %>%
+    bind_cols(., tibble(site_names)) %>%
+           # Create polygon (approximating a circle) with a given radius. These 
+           # vertices are used for creating the end points for the fetch vectors.
+    mutate(d_bff = st_buffer(geometry, dist = max_dist, nQuadSegs = n_directions),
+           # Calculate end points at the maximum distances.       
+           fetch_ends = map(d_bff, ~head(st_coordinates(.)[,1:2], -1)),
+           fetch_ends = map(fetch_ends, ~.[order(directions),]),
+           # Create matrix repeating site coordinates (nrow = number of fetch directions)
+           coords = map(geometry, st_coordinates),
+           coords = map(coords, ~.[rep(1:nrow(.), times = n_directions * 4),]),
+           # bind site coordinates with fetch ends
+           all_mat = map2(coords, fetch_ends, rbind),
+           # split matrix into list
+           all_list = map(all_mat, ~split(., sort(directions))),
+           # Create a list of 2x2 matrices indicating the start and end coordinates
+           line_list = map(all_list, ~map(., matrix, ncol = 2)),
+           # create sf line objects for all fetch directions
+           # Lines radiate around site to max distance
+           fetch_st_lines = map(line_list, ~st_sf(geom = st_sfc(st_multilinestring(.), 
+                                                   crs = st_crs(polygon_layer)))),
+           # determine indices of subset of polygons intersecting 
+           # with full length fetch lines
+           poly_sub = map(fetch_st_lines, ~st_intersects(., polygon_layer)),
+           # cast from multiline to line (one row per direction)
+           fetch_st_lines = map(fetch_st_lines, st_cast, 'LINESTRING'),
+           # sort rows in sf line dataframes by fetch direction
+           fetch_st_lines = map(fetch_st_lines, ~ mutate(., direction = sort(directions))),
+           # Erase polygon layer from fetch lines
+           fetch_st_lines = map2(fetch_st_lines, poly_sub,
+                                ~st_difference(.x, st_union(st_combine(polygon_layer[unique(unlist(.y)),])))),
+           # Extract first line segment from each fetch direction (this is fetch line shortened by first polygon intersection)
+           fetch_st_lines = map(fetch_st_lines, ~st_cast(., 'LINESTRING')[as.character(seq(1:(n_directions * 4))),]),
+           # Calculate fetch line lengths
+           fetch_length = map(fetch_st_lines, st_length)) %>%
+    dplyr::select(., site_names, fetch_st_lines, fetch_length) %>%
+    unnest(., cols = c(fetch_length, fetch_st_lines)) %>% 
+    dplyr::select(-geom)
+
+}
+
+```
+
+# parallel processing fetch function
+
+```{r}
+############################################################
+####    Run fetch function with parallel processing     ####
+############################################################
+
+# source fetch function
+
+# source("./processed_EvD/fetch/obrienjm25-REI-WaveExp-fbf17f9/Code/3Fetch.R")
+
+# Run fetch function in parallel using multidplyr
+
+#' polygon_layer = sf object where the
+#'                polygon geometries represent any obstructions to fetch
+#'                calculations including the coastline, islands and/or 
+#'                exposed reefs.
+#' site_layer = sf object where the point 
+#'                geometries represent the site locations.
+#' max_dist = numeric. Maximum distance in kilometres (default 300). This 
+#'                will need to be scaled manually if the units for the CRS are 
+#'                not 'm'.
+#' n_directions = numeric. The number of fetch vectors to calculate per 
+#'                quadrant (default 8).
+#' site_var (character) = column name in site_layer sf object holding variable
+#'                        for site names
+
+fetch_parallel = function(polygon_layer, site_layer, max_dist = 300, 
+                          n_directions = 8, site_var){ 
+  
+  # Determine number of cores available minus 1
+  cl <- detectCores() - 1
+  
+  # Set up new cluster for parallel processing with one fewer than number of
+  # available cores
+  # Load required libraries, objects, and functions to each core
+  cluster <- new_cluster(n = cl) %>% 
+    cluster_library(c('sf','raster','stringi','purrr','dplyr','tidyr','units')) %>% 
+    cluster_assign(fetch = fetch,
+                   site_layer = site_layer,
+                   polygon_layer = polygon_layer,
+                   max_dist = max_dist,
+                   n_directions = n_directions,
+                   site_var = site_var)
+  
+  # Calculate fetch for all survey sites in 11.25 degree increments
+  fetch_20points_c <- site_layer %>%
+    bind_cols(., cl_group = rep(1:cl, length.out = nrow(.))) %>% # grouping variable to split obs over cores
+    group_by(cl_group) %>% # group by grouping variable
+    partition(cluster = cluster) %>% # partition obs. to clusters (create party_df)
+    do(fetch(polygon_layer = polygon_layer, # calculate fetch in parallel
+             site_layer = .,
+             max_dist = max_dist,
+             n_directions = n_directions,
+             site_names = pull(., var = site_var))) %>% 
+    collect() %>% # combine observations from all clusters
+    st_as_sf(sf_column_name = 'geometry') %>% 
+    ungroup()
+  
+  return(fetch_20points_c)
+  
+}
+
+```
+
+Calculating effective fetch from the csv generated above
+Feel free to ignore most of the commented-out code, I have adapted it to work for my data structure
+
+```{r}
+#######################################################################
+########## Calculate effective fetch from raw fetch vectors ###########
+#######################################################################
+
+# Description: ----
+
+# This script takes fetch distances in 32 directions around grid points,
+# the output of Python fetch script, and calculates for each point:
+#
+# 1) Minimum fetch: the shortest fetch distance (proxy for distance to coast)
+# 2) Sum fetch: the sum of all 32 fetch distances (proxy for wave exposure)
+# 3) Effective fetch: in 8 directions (N, NE, E, SE, S, SW, W, NW); 
+#    needed to calculate Relative Exposure Index (REI)*
+#
+# *For description of effective fetch and REI, see:
+#
+# Fonseca MS, Bell SS (1998) Influence of physical setting on seagrass
+#   landscapes near Beaufort, North Carolina, USA. Mar Ecol Prog Ser
+#   171:109-121
+
+# Requirements: ----
+
+# csv file(s) containing outputs of Python fetch script
+# i.e. fetch distance (metres) in 32 directions around grid points
+# One row per point
+
+# Load packages ----
+
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(data.table)
+library(sf)
+library(vroom)
+
+# Source functions ----
+
+# source('./processed_EvD/fetch/obrienjm25-REI-WaveExp-fbf17f9/Code/roll_recycle_fun.R')
+
+# Controls ----
+
+# relative contribution of fetch vectors surrounding each heading to calculation of effective fetch
+
+weights <- cos(c(45,33.75,22.5,11.25,0,11.25,22.5,33.75,45) * (pi/180))
+
+# Path to project directory (string)
+
+projDir <- "~/Desktop/green-bces"
+
+# Coordinate reference system of fetch calculations (integer EPSG code)
+
+crs_fetch <- 3347 # NAD83 / Statistics Canada Lambert
+
+# Combine fetch data from all points into one data table ----
+
+# list of fetch files
+
+#fetch_csv <- list.files(path = projDir,
+                        #pattern = 'csv',
+                        #recursive = TRUE,
+                        #full.names = TRUE)
+
+# Combine csv files from separate clusters of points and reshape to long format
+
+#fetch_summary <- map(fetch_csv, fread) %>%
+  #rbindlist(idcol = 'cluster') %>%
+ # mutate(., site_names = seq_along(cluster)) %>%
+  #pivot_longer(data = .,
+               #cols = starts_with("bearing"),
+               #values_to = "fetch_length_m",
+               #names_to = "direction",
+               #names_prefix = "bearing",
+               #names_transform = list(direction = as.numeric)) %>%
+  #setDT()
+
+
+# site names column was full of NAs 
+site_names_vec <- rep(c(1:20), each = 36)
+# raw_fetch_36dir$site_names <- site_names_vec
+# raw_fetch_36dir$site_names <- factor(raw_fetch_36dir$site_names)
+```
+
+This is from a previous attempt at doing a fetch subsample, fetch_20points no longer exists
+
+```{r}
+# fetch_proxies <- fetch_20points %>% 
+  #group_by(geometry) %>% 
+  #mutate(min_fetch = min(fetch_length), sum_fetch = sum(fetch_length))
+
+# Calculate minimum fetch (proxy for distance to coast) and sum fetch (proxy for wave exposure)
+#fetch_proxies <- fetch_20points[, .(min_fetch = min(fetch_length),
+                                # sum_fetch = sum(fetch_length)),
+                             #by = .(site_names,"geometry")]
+
+#vroom_write(fetch_proxies, "Data/fetch_proxies.csv", delim = ",")
+
+# Calculate effective fetch ----
+
+#fetch_eff <- fetch_20points %>%
+  #select(geometry, direction, fetch_length) %>% 
+  #group_by(geometry) %>% 
+  #nest() %>% 
+  #bind_cols(., site_names = as.character(seq_len(nrow(.)))) %>%   
+  # Calculate effective fetch and place in tibble
+  #mutate(fetch_eff = map(data, ~roll.recycle(.$fetch_length, 9, 8, by = 4)),
+         #fetch_eff = map(fetch_eff, ~as.vector((weights %*% .)/sum(weights))),
+         #fetch_eff = map(fetch_eff, ~tibble(direction = c(360, seq(45, 315, 45)), fetch = .))) %>% 
+  #st_set_geometry("geometry")
+
+#saveRDS(fetch_eff, "Data/fetch_effective.rds")
+```
+
+Same note applies here
+
+```{r}
+# calculating effective fetch
+
+#fetch_eff <- fetch_20points %>%
+ # group_by(site_names) %>%
+ # summarise(
+    #fetch_eff = list({
+    #  f <- roll.recycle(fetch_length, 9, 8, by = 4)
+    #  f <- as.vector((weights %*% f) / sum(weights))
+    #  tibble(
+     #   direction = c(360, seq(45, 315, 45)),
+    #    fetch = f
+  #    )
+ #   }),
+ #   .groups = "drop"
+ # ) %>%
+ # tidyr::unnest(fetch_eff)
+
+# visualize fetch using a raster
+# fetch_raster <- rast(fetch_eff)
+# plot(fetch_eff)
+
+```
+
+Relative Exposure Index calculation
+
+```{r}
+install.packages("weathercan", repos = "https://dev.ropensci.org")
+library(weathercan)
+install.packages("naniar")
+library(naniar)
+
+# loading in wind data to get started on the REI calculation
+
+# fiding stations on the east coast of JB
+east_coast <- stations_search(coords = c(53.547211, -78.984518),
+                              interval = "day", dist = 100)
+
+# getting weather data from these for 2025
+east_coast_data <- weather_dl(station_ids = east_coast$station_id, 
+                              start = "2025-12-01", 
+                              interval = "hour", quiet = TRUE) 
+
+# only shows two stations because they are the only ones with wind data going up until 2025
+
+# finding stations on the west coast of JB 
+west_coast <- stations_search(coords = c(53.474720, -82.139678),
+                              interval = "day", dist = 100)
+
+# getting west coast weather data
+west_coast_data <- weather_dl(station_ids = west_coast$station_id, 
+                              start = "2025-12-01", 
+                              interval = "hour", quiet = TRUE)
+# same with this wind station
+
+east_coast_data <- as.data.frame(east_coast_data)
+
+east_coast_data_wind <- east_coast_data %>% 
+  dplyr::select(station_name, station_id, lat, lon, date, time, wind_dir, wind_spd) %>% 
+  filter(!is.na(wind_dir & wind_spd)) %>% 
+  dplyr::group_by(date) %>% 
+  mutate(mean_dir = mean(wind_dir)) %>% 
+  mutate(wind_dir_360 = wind_dir*10) 
+  
+# calculate wind frequency
+wind_freq_data <- east_coast_data_wind %>% 
+  group_by(date, station_name, wind_dir) %>% 
+  summarise(n = n()) %>% 
+  mutate(wind_freq = n/24*100)
+
+west_coast_wind_data <- west_coast_data %>% 
+  dplyr::select(station_name, station_id, lat, lon, date, time, wind_dir, wind_spd) %>%
+  filter(!is.na(wind_dir & wind_spd)) %>% 
+  dplyr::group_by(date) %>% 
+  mutate(mean_dir = mean(wind_dir)) %>% 
+  mutate(wind_dir_360 = wind_dir*10)
+  
+
+hist(east_coast_data_wind$mean_dir)
+hist(west_coast_wind_data$mean_dir)
+
+
+```
+
+
