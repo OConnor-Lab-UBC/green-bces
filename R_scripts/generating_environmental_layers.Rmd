@@ -1,0 +1,125 @@
+---
+title: "generating_environmental_layers"
+author: "Maya Green"
+date: "2026-06-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/github/green-bces")
+
+```
+
+```{r}
+library(terra)
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(fields)
+library(sf)
+```
+
+#### Salinity
+Data from LeBlanc et al. salinity point data collected during 1999, 2000, 2004, 2009, 2011, 2014, 2018-2020 
+To be interpolated and downscaled to 20m resolution
+Need to find a validation dataset for this 
+
+```{r}
+salinity_1999_2020 <- read_csv("raw_bio_data/CHCRP eelgrass datasheets /Leblanc et al/Salinity_temperature_1999_2020.csv")
+
+salinity_2019_no_NA <- salinity_1999_2020 %>% 
+  filter(Year == 2019) %>% 
+  filter(!is.na(Salinity_psu))
+
+res <- 20 
+val <- 0
+
+raster_extent <- ext(eelgrass_points_km)
+
+# create an empty raster 
+salinity_raster <-rast(
+  extent = raster_extent,
+  resolution = res,
+  crs = "EPSG: 3725",
+  vals = 1
+)
+
+salinity_xy <- salinity_2019_no_NA %>% 
+  select(Long, Lat)
+
+
+salinity_vect <- vect(salinity_xy, crs = "EPSG: 4326") # load in with correct CRS
+projected <- project(salinity_vect,"EPSG: 3725") # then project to meters
+
+xy <- as.data.frame(geom(projected)) %>% select(x,y)
+v <- salinity_2019_no_NA$Salinity_psu
+
+
+tps <- Tps(xy, v)
+p <- rast(salinity_raster)
+
+p <- interpolate(p, tps)
+p <- mask(p, salinity_raster)
+plot(p) 
+
+
+# crop using land polygon 
+land_polygon <- vect("shapefiles/clipped_east_coast_2021_bdry.shp")
+land_polygon_projected <- land_polygon %>% 
+  project("EPSG: 3725")
+
+cropped_sal_rast <- mask(p, land_polygon_projected, inverse = TRUE)
+plot(cropped_sal_rast)
+
+
+# write as raster and save
+writeRaster(cropped_sal_rast, filename = "./processed_evd/environmental_layers/salinity_raster_20m_res_2019_leblanc.tiff")
+
+```
+
+### Temperature 
+```{r}
+temperature_1999_2020 <- read_csv("raw_bio_data/CHCRP eelgrass datasheets /Leblanc et al/Salinity_temperature_1999_2020.csv")
+
+temperature_2019_no_NA <- temperature_1999_2020 %>% 
+  filter(Year == 2019) %>% 
+  filter(!is.na(Temperature_Celsius))
+
+res <- 20 
+
+raster_extent <- ext(eelgrass_points_km)
+
+# create an empty raster 
+temp_raster <-rast(
+  extent = raster_extent,
+  resolution = res,
+  crs = "EPSG: 3725",
+  vals = 1
+)
+
+temp_xy <- temperature_2019_no_NA %>% 
+  select(Long, Lat)
+
+temp_vect <- vect(temp_xy, crs = "EPSG: 4326") # load in with correct CRS
+projected_temp <- project(temp_vect,"EPSG: 3725") # then project to meters
+
+xy <- as.data.frame(geom(projected_temp)) %>% select(x,y)
+v <- temperature_2019_no_NA$Temperature_Celsius
+
+tps_temp <- Tps(xy, v)
+p <- rast(temp_raster)
+
+p <- interpolate(p, tps_temp)
+plot(p) 
+
+cropped_temp_rast <- mask(p, land_polygon_projected, inverse = TRUE)
+plot(cropped_temp_rast)
+
+
+# write as raster and save
+writeRaster(cropped_temp_rast, filename = "./processed_evd/environmental_layers/temperature_raster_20m_res_2019_leblanc.tiff")
+
+```
+
+

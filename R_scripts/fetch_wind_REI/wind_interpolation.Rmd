@@ -7,85 +7,10 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/github/green-bces")
 ```
 
-```{r}
-library(reticulate)
-py_install(c("geopandas", "scipy", "rasterio", "numpy"))
-```
-
-
-This script was adapted from O'Brien et al (5WindInterpolation.py, https://github.com/cole-fields/REI-WaveExp/blob/fbf17f9ebb1c20c1a2123208279cefaed78d1b07/Code/5WindInterpolation.py)
-
-
-```{python}
-
-import geopandas as gpd
-import numpy as np
-from scipy.interpolate import RBFInterpolator
-import rasterio
-from rasterio.transform import from_bounds
-import os
-
-# Set working directory
-working_dir = os.path.expanduser("~/Documents/github/green-bces/processed_evd")
-output_dir = os.path.join(working_dir, "interpolated_splines")
-os.makedirs(output_dir, exist_ok=True)
-
-# Load shapefile
-gdf = gpd.read_file(os.path.join(working_dir, "Copernicus_era5_summary_wide.shp"))
-
-# Get coordinates
-coords = np.array(list(zip(gdf.geometry.x, gdf.geometry.y))) # putting x and y coords into pairs in a list
-
-# Set up output grid
-xmin, ymin, xmax, ymax = gdf.total_bounds # correct order
-cell_size = 350.0 # set large to test run initially 
-grid_x, grid_y = np.meshgrid(
-    np.arange(xmin, xmax, cell_size),
-    np.arange(ymin, ymax, cell_size)
-)
-
-# grid_points = np.array(list(zip(grid_x.ravel(), grid_y.ravel())))
-grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-
-
-# Get numeric fields only
-numeric_fields = gdf.select_dtypes(include=[np.number]).columns
-print(f"Fields to interpolate: {list(numeric_fields)}")
-
-for field in numeric_fields:
-    print(f"Interpolating {field}...")
-    try:
-        values = gdf[field].values
-        
-        # RBFInterpolator with thin plate spline (closest to regularized spline)
-        interpolator = RBFInterpolator(coords, values, 
-        smoothing=0.1, 
-        kernel='thin_plate_spline' 
-      ) 
-        grid_values = interpolator(grid_points).reshape(grid_x.shape)
-        
-        # Save as GeoTIFF
-        output_path = os.path.join(output_dir, f"{field}_spline.tif")
-        transform = from_bounds(xmin, ymin, xmax, ymax, grid_x.shape[1], grid_x.shape[0])
-        with rasterio.open(
-            output_path, "w",
-            driver="GTiff",
-            height=grid_x.shape[0],
-            width=grid_x.shape[1],
-            count=1,
-            dtype=grid_values.dtype,
-            crs=gdf.crs,
-            transform=transform
-        ) as dst:
-            dst.write(grid_values, 1)
-        print(f"Saved: {output_path}")
-    except Exception as e:
-        print(f"Error on {field}: {e}")
-
-print("Script complete")
-```
+Interpolating 2019 wind data from copernicus
 
 ```{r}
 library(dplyr)
@@ -93,25 +18,61 @@ library(purrr)
 library(tidyr)
 library(sf)
 library(terra)
-library(rgis)
 library(raster)
+library(fields)
 
 # read in shapefile 
-wind_raw <- read_sf("Copernicus_era5_summary_wide.shp")
+wind_raw <- read_sf("./processed_evd/wind_data/Copernicus_era5_summary_wide.shp") 
 
-# extract point geometries 
-geometries <- st_coordinates(st_geometry(wind_raw))
-geometries <- as.data.frame(geometries)
-x <- (geometries$X)
-y <- (geometries$Y)
+# add eelgrass points df 
 
-xmin <- min(x, na.rm = T)
-xmax <- max(x, na.rm = T)
-ymin <- min(y, na.rm = T)
-ymax <- max(y, na.rm = T)
+eelgrass_points <- read_sf("./shapefiles/PA_points_SDM/points_within_incl_attributes.shp")
+res = 20
+raster_extent <- ext(eelgrass_points)
 
-splines <- spline(x, y, n = 3*length(x), method = "natural",
-       xmin = xmin, xmax = xmax, ties = mean) # splined points have no values 
+# create an empty raster 
+  empty_raster <-rast(
+  extent = raster_extent,
+  resolution = res,
+  crs = "EPSG: 3725",
+  vals = 1
+  )
+  
+# extract xy from wind geometry
+wind_xy <- st_coordinates(wind_raw$geometry)
+
+wind_vect <- vect(wind_xy, crs = crs(wind_raw))
+xy <- project(wind_vect, "EPSG:3725") 
+xy <- as.data.frame(geom(xy)) %>% dplyr::select(x,y)
+
+wind_raw_df <- as.data.frame(wind_raw)
+
+# first column is id, last column is geometry
+wind_raw_df <- wind_raw_df %>% 
+  dplyr::select(-id, -geometry)
+
+for (i in 1:ncol(wind_raw_df)) {
+  
+  print(i)
+  v <- wind_raw_df[,i]
+
+  tps <- Tps(xy, v)
+  p <- rast(empty_raster)
+
+  p <- interpolate(p, tps)
+
+  # crop using land polygon 
+  land_polygon <- vect("shapefiles/clipped_east_coast_2021_bdry.shp")
+  land_polygon_projected <- land_polygon %>% 
+    project("EPSG: 3725")
+
+  cropped_rast <- mask(p, land_polygon_projected, inverse = TRUE)
+  plot(cropped_rast)
+
+  # write as raster and save
+  writeRaster(cropped_rast, filename = sprintf("./processed_evd/environmental_layers/%s_wind_raster_20m_res_2019.tiff", colnames(wind_raw_df)[i]))
+  
+}
 
 
 ```
