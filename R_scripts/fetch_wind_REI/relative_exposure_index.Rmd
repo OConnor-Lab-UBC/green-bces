@@ -1,0 +1,152 @@
+---
+title: "REI"
+output: html_notebook
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/github/green-bces")
+```
+
+*Order of operations*
+
+1. Create a list of filenames for raster tiffs of i) wind frequency and ii) wind speed 
+2. Create raster stacks of wind frequency rasters and wind speed rasters
+3. Load in .rds of effective fetch data (df of dfs of effective fetch in 8 directions for each point)
+4. Ensure effective fetch is in the same CRS as wind data and project if necessary
+5. Extract frequency + speed from raster stacks at each fetch location
+6. Bind these into a matrix called wind_combine
+7. Calculate REI and place in df 
+8. Save REI as .csv file 
+
+```{r}
+#######################################################################
+##########Environmental Data Layers for SG sdm#########################
+#######################################################################
+
+#### Load Packages ####
+
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(sf)
+library(raster)
+library(sf)
+library(prioritizr)
+library(tidyterra)
+
+# Housekeeping ----
+
+# Speed up raster processes
+
+rasterOptions(chunksize = 1e+05, maxmemory = 1e+09)
+
+# Read in interpolated wind data ----
+
+# Create a list of file names
+
+wind_freq <- list.files(path = "./processed_evd/environmental_layers/",
+                   pattern = "^freq.+tiff$",
+                   full.names = T) 
+
+wind_freq_stack <- rast(wind_freq)
+
+
+# Raster stack of average daily maximum wind speed by direction
+
+wind_spd <- list.files(path = "./processed_evd/environmental_layers/",
+                  pattern = "^mx.+tiff$",
+                  full.names = T) 
+
+wind_spd_stack <- rast(wind_spd)
+```
+
+
+
+```{r}
+# Combine fetch data and wind data ----
+
+# Read in effective fetch data
+fetch_eff <- readRDS("./processed_evd/fetch/fetch_effective.rds") 
+
+# this is an sf object, so need to convert geometries to SpatVector while maintaining fetch tibble data to use in that form later 
+
+# make geometry df with site names 
+fetch_geometries <- fetch_eff %>% 
+  select(site_names, geometry)
+
+# make df of just fetch tibbles 
+fetch_tibbles <- fetch_eff %>% 
+  select(site_names, fetch_eff)
+
+# turn geometries into a SpatVector 
+fetch_geom_vect <- terra::vect(fetch_geometries) 
+  
+# check CRS alignment and project if necessary
+crs(fetch_geom_vect)
+crs(wind_freq_stack)
+
+# project fetch_eff to crs of wind stacks 
+wind_crs <- crs(wind_freq_stack)
+fetch_geom_vect <- project(fetch_geom_vect, wind_crs) # project to wind CRS 
+
+
+# will need to rename columns so later function can be applied 
+freq_names <- c("site_names", "freq_135", "freq_180", "freq_225", "freq_270", "freq_315", "freq_360", "freq_45", "freq_90")
+old_f_names <- colnames(extracted_freq)
+old_spd_names <- colnames(extracted_spd)
+spd_names <- c("site_names", "mx_135", "mx_180", "mx_225", "mx_270", "mx_315", "mx_360", "mx_45", "mx_90")
+  
+
+# Extract frequency and speed values for fetch locations
+extracted_freq <- terra::extract(wind_freq_stack, fetch_geom_vect, fun = NULL, ID = F, bind = TRUE) %>% 
+  as.data.frame(.) %>% 
+  rename_at(old_f_names, ~freq_names)
+  
+extracted_spd <- terra::extract(wind_spd_stack, fetch_geom_vect, fun = NULL, ID = F, bind = TRUE) %>% 
+  as.data.frame(.) %>% 
+  rename_at(old_spd_names, ~spd_names)
+
+
+# combine into a single df
+wind_all <- left_join(extracted_freq, extracted_spd, by = "site_names")
+wind_combine <- left_join(wind_all, fetch_tibbles, by = "site_names")
+```
+
+
+
+```{r}
+# Calculate Relative Exposure Index ----
+
+expo_by_site <- wind_combine %>%
+  rowwise() %>% 
+  mutate(freq_total = list(cbind(c_across(contains("freq")))), 
+         max_wind = list(cbind(c_across(contains("mx")))), 
+         wind_dir_freq = list(tibble(max_wind, 
+                                freq_total, 
+                                direction = c(135,180,225,270,315,360,45,90)))) %>%
+  ungroup() %>% 
+  mutate(., wind_dir_freq = map(wind_dir_freq, function(.data) {
+    .data %>% 
+      dplyr::arrange(., direction)
+  }),
+  fetch_eff = map(fetch_eff, function(.data){
+    .data %>% 
+      dplyr::arrange(., direction)
+  })) %>% 
+  mutate(REI = map2_dbl(wind_dir_freq, fetch_eff, # calculate relative exposure
+                        ~sum((.x$max_wind*.x$freq_total*.y$fetch), na.rm = T))) %>%  
+  dplyr::select(site_names, REI, geometry) # keep site, REI, and geometry
+
+# Save REI object
+
+saveRDS(expo_by_site, './processed_evd/REI.rds')
+
+# Write to csv
+
+st_write(obj = expo_by_site,
+         dsn = './processed_evd/REI.csv',
+         layer_options = 'GEOMETRY=AS_XY')
+
+```
+
+
