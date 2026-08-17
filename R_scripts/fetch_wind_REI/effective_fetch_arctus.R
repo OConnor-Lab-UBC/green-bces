@@ -27,6 +27,7 @@
 # Load packages ----
 
 library(dplyr)
+library(readr)
 library(purrr)
 library(tidyr)
 library(data.table)
@@ -59,27 +60,22 @@ fetch_csv <- list.files(path = projDir,
                         recursive = TRUE,
                         full.names = TRUE)
 
-# Combine csv files from separate clusters of points and reshape to long format
+num_fetch_vals <- 640000/32 # should be num rows in the fetch table/32 
+combined_arctus_fetch <- read_csv("./processed_evd/fetch/combined_arctus_fetch.csv")
 
-fetch_summary <- map(fetch_csv, fread) %>%
-  rbindlist(idcol = 'cluster') %>%
-  mutate(., site_names = seq_along(cluster)) %>%
-  pivot_longer(data = .,
-               cols = starts_with("direction"),
-               values_to = "fetch_length_m",
-               names_to = "direction",
-               #names_prefix = "bearing",
-               names_transform = list(direction = as.numeric)) %>%
-  setDT()
-
+### issue: geometry column was read in as a character column, needs to be an sf object to apply st_coordinates 
 
 # prepare combined_arctus_fetch for input into effective fetch function 
 fetch_summary <- combined_arctus_fetch %>% 
-  mutate(site_names = rep(1:2000, each = 32),
+  mutate(site_names = rep(1:num_fetch_vals, each = 32),
          X = st_coordinates(geometry)[,1],
          Y = st_coordinates(geometry)[,2]) %>% 
   dplyr::rename(fetch_length_m = fetch_length, cluster = cl_group) %>% 
   select(site_names,fetch_length_m,direction,X,Y)
+
+#### Checkpoint: Effective fetch must be in the same CRS as wind rasters. Project to correct CRS below
+wind_crs <- crs(wind_rast_mxspd360) # use existing wind raster to determine CRS
+fetch_summary_projected <- st_transform(fetch_summary, wind_crs) # project to wind CRS
 
 
 # Calculate minimum fetch (proxy for distance to coast) and sum fetch (proxy for wave exposure)
@@ -88,8 +84,6 @@ fetch_proxies <- fetch_summary %>%
   mutate(min_fetch = min(fetch_length_m),
          sum_fetch = sum(fetch_length_m))
 
-
-# vroom_write(fetch_proxies, "Data/fetch_proxies.csv", delim = ",")
 
 # Calculate effective fetch ----
 
@@ -106,7 +100,10 @@ fetch_eff <- fetch_summary %>%
 
 saveRDS(fetch_eff, "./processed_evd/fetch/fetch_effective.rds")
 
+# Error in clean_columns(as.data.frame(obj), factorsAsCharacter) : 
+# list columns are only allowed with raw vector contents
+
 st_write(fetch_eff,
          dsn = './processed_evd/fetch/',
          layer = "fetch_effective",
-         driver = 'ESRI Shapefile')
+         driver = 'ESRI Shapefile') 
