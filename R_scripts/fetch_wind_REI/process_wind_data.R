@@ -195,4 +195,3 @@ st_write(wind_wide,
          layer = "Copernicus_era5_summary_wide",
          driver = 'ESRI Shapefile')
 
-# Move onto wind data interpolation: (4WindInterpolation.py)
