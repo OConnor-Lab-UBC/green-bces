@@ -25,8 +25,10 @@ library(tidyr)
 library(sf)
 library(raster)
 library(sf)
-library(prioritizr)
+# library(prioritizr)
 library(tidyterra)
+library(terra)
+library(fields)
 
 # Read in interpolated wind data ----
 
@@ -36,7 +38,7 @@ wind_freq <- list.files(path = "./processed_evd/wind_data/whole_coast_rei/interp
                         pattern = "^freq.+tiff$",
                         full.names = T) 
 
-wind_freq_stack <- rast(wind_freq)
+wind_freq_stack <- terra::rast(wind_freq)
 
 
 # Raster stack of average daily maximum wind speed by direction
@@ -45,7 +47,7 @@ wind_spd <- list.files(path = "./processed_evd/wind_data/whole_coast_rei/interp_
                        pattern = "^mx.+tiff$",
                        full.names = T) 
 
-wind_spd_stack <- rast(wind_spd)
+wind_spd_stack <- terra::rast(wind_spd)
 
 
 # Combine fetch data and wind data ----
@@ -73,7 +75,7 @@ crs(wind_freq_stack)
 
 # project fetch_eff to crs of wind stacks 
 wind_crs <- crs(wind_freq_stack)
-fetch_geom_vect <- project(fetch_geom_vect, wind_crs) # project to wind CRS 
+fetch_geom_vect <- terra::project(fetch_geom_vect, wind_crs) # project to wind CRS 
 
 
 # will need to rename columns so later function can be applied 
@@ -133,10 +135,10 @@ expo_by_site <- wind_combine %>%
   dplyr::select(site_names, REI, geometry) # keep site, REI, and geometry 
 
 # scale REI values on a scale of 0-1 
-max(expo_by_site$REI) # 3731911
+max_rei <- max(expo_by_site$REI) # 3731911
 
 expo_by_site <- expo_by_site |> 
-  mutate(scaled_REI = REI/3731911) |> 
+  mutate(scaled_REI = REI/max_rei) |> 
   mutate(log_REI = log(REI))
 
 # Save REI object
@@ -155,7 +157,8 @@ st_write(obj = expo_by_site,
 st_write(expo_by_site,
          dsn = "./processed_evd/fetch/whole_coast/whole_coast_REI_10k_points.shp",
          layer = "REI",
-         driver = "ESRI Shapefile")
+         driver = "ESRI Shapefile",
+         delete_layer = TRUE)
 
 
 # Interpolating REI 
@@ -163,12 +166,13 @@ rei <- read_csv("./processed_evd/fetch/whole_coast/whole_coast_REI_10k_points.cs
 
 # read in shapefile with correct extent
 whole_coast_fetch_points <- read_sf("./processed_evd/fetch/whole_coast/whole_coast_points_for_REI_calc.shp")
-res = 30
-raster_extent <- ext(whole_coast_fetch_points)
+res = 90
+raster_extent <- terra::ext(whole_coast_fetch_points)
 crs <- "EPSG:3347"
 
 # create an empty raster 
-temp_raster <-rast(
+# trying this with a lower resolution because of runtime issues (90 m)
+temp_raster <-terra::rast(
   extent = raster_extent,
   resolution = res,
   crs = crs,
@@ -176,17 +180,18 @@ temp_raster <-rast(
 )
 
 rei_xy <- rei %>% 
-  select(X, Y)
+  dplyr::select(X, Y)
 
-rei_vect <- vect(rei_xy) # load in with correct CRS
+rei_vect <- terra::vect(rei_xy) # load in with correct CRS
 
-xy <- as.data.frame(geom(rei_vect)) %>% select(x,y) # what space to interpolate over
-v <- rei$scaled_REI# what value to interpolate
+xy <- as.data.frame(terra::geom(rei_vect)) %>% dplyr::select(x,y) # what space to interpolate over
+v <- rei$scaled_REI # what values to interpolate
 
-tps_rei <- Tps(xy, v) 
-p <- rast(temp_raster)
+tps_rei <- fields::Tps(xy, v) # runtime: ~ 9 min
+# plot
+p <- terra::rast(temp_raster)
 
-p <- interpolate(p, tps_rei)
+p <- terra::interpolate(p, tps_rei)
 plot(p) 
 
 cropped_temp_rast <- mask(p, land_polygon_projected, inverse = TRUE)
