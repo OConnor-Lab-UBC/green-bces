@@ -182,7 +182,7 @@ temp_raster <-terra::rast(
 rei_xy <- rei %>% 
   dplyr::select(X, Y)
 
-rei_vect <- terra::vect(rei_xy) # load in with correct CRS
+rei_vect <- terra::vect(rei_xy) # load in with correct CRS 
 
 xy <- as.data.frame(terra::geom(rei_vect)) %>% dplyr::select(x,y) # what space to interpolate over
 v <- rei$scaled_REI # what values to interpolate
