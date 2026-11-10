@@ -188,8 +188,18 @@ xy <- as.data.frame(terra::geom(rei_vect)) %>% dplyr::select(x,y) # what space t
 v <- rei$scaled_REI # what values to interpolate
 
 tps_rei <- fields::Tps(xy, v) # runtime: ~ 9 min
-# plot
+
 p <- terra::rast(temp_raster)
+
+# sample 1000 cells of p to test interpolation function
+p_sample <- crop(p, ext(7020618, 7029495,2000783, 2029779))
+pred_win <- interpolate(p_sample, tps_rei) #success 
+
+# daring to try one with a larger extent
+p_sample <- crop(p, ext(6968550,7072395,1813425,2117910))
+pred_east <- interpolate(p_sample, tps_rei)  
+
+
 
 p <- terra::interpolate(p, tps_rei)
 plot(p) 
